@@ -1,0 +1,13 @@
+{
+  "name": "Pamoja Switchboard",
+  "description": "An enterprise-grade AI-powered call switchboard optimized for all Android devices and tablets. Features seamless routing, virtual contact management, and real-time call analytics for the East Africa corridor.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "AI Call Categorization",
+    "Real-time Analytics",
+    "Virtual Contact Management",
+    "Smart Routing"
+  ]
+}

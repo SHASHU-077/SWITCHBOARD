@@ -1,0 +1,133 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'mkubalimusa25@gmail.com' && request.auth.token.email_verified == true
+      );
+    }
+
+    function isMember(orgId) {
+      return isSignedIn() && exists(/databases/$(database)/documents/organizations_meta/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/organizations_meta/$(request.auth.uid)).data.orgId == orgId;
+    }
+
+    // Organization validation helper
+    function isValidOrganization(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.adminId is string && data.adminId.size() > 0 &&
+             data.status in ['pending', 'verified', 'suspended'] &&
+             (data.get('isDiscoverable', true) is bool) &&
+             (data.get('prefix', '') is string && data.get('prefix', '').size() <= 4) &&
+             (data.get('isPaymentActive', false) is bool);
+    }
+
+    // 1. Organizations Meta (User to Org mapping)
+    match /organizations_meta/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      // Only admins can update or delete
+      allow update, delete: if isAdmin();
+      // Only allow creation if the orgId matches an organization being created in the same batch,
+      // and the user is the adminId of that org.
+      allow create: if isOwner(userId) && 
+                    incoming().orgId is string && 
+                    // This ensures the user is associated with the org they are creating or an admin set it
+                    (getAfter(/databases/$(database)/documents/organizations/$(incoming().orgId)).data.adminId == userId || isAdmin());
+    }
+
+    // 2. Organizations
+    match /organizations/{orgId} {
+      allow get: if isSignedIn() && (isMember(orgId) || resource.data.get('isDiscoverable', false) == true || isAdmin());
+      allow list: if isSignedIn() && (isMember(orgId) || resource.data.get('isDiscoverable', false) == true || isAdmin());
+      
+      allow create: if isSignedIn() && isValidId(orgId) && isValidOrganization(incoming()) && (
+        incoming().adminId == request.auth.uid || isAdmin()
+      ) && incoming().createdAt == request.time;
+      
+      allow update: if isSignedIn() && (
+        // Action: User Profile Update (Restricted fields)
+        (existing().adminId == request.auth.uid && 
+         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'industry', 'headquarters', 'status', 'isDiscoverable', 'gsmTargets', 'queueMessage', 'updatedAt']) && 
+         isValidOrganization(incoming()) &&
+         incoming().get('updatedAt', request.time) == request.time) ||
+        // Action: Platform Owner Update (All fields including temporal/billing)
+        (isAdmin() && 
+         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'industry', 'headquarters', 'status', 'isDiscoverable', 'selectedNumbers', 'gsmTargets', 'queueMessage', 'prefix', 'trialStartDate', 'subscriptionExpiryDate', 'isPaymentActive', 'updatedAt']) && 
+         isValidOrganization(incoming()) &&
+         incoming().get('updatedAt', request.time) == request.time)
+      );
+
+      // 3. Sub-collections (Calls, Agents)
+      match /calls/{callId} {
+        allow read: if isMember(orgId) || isAdmin();
+        allow write: if isMember(orgId) || isAdmin();
+      }
+
+      match /agents/{agentId} {
+        allow read: if isMember(orgId) || isAdmin();
+        allow write: if (isMember(orgId) && get(/databases/$(database)/documents/organizations/$(orgId)).data.adminId == request.auth.uid) || isAdmin();
+      }
+    }
+
+    // 4. Global Pool and Marketplace
+    match /virtual_numbers/{numberId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /marketplace_leads/{leadId} {
+      // Any signed in user can see available leads
+      allow read: if isSignedIn();
+      
+      // Creating a lead
+      allow create: if isSignedIn() && incoming().sellerOrgId != null && 
+                    isMember(incoming().sellerOrgId) &&
+                    incoming().status == 'available' &&
+                    incoming().createdAt == request.time;
+      
+      // Purchasing a lead
+      allow update: if isSignedIn() && (
+        // Action: Purchase
+        (incoming().diff(existing()).affectedKeys().hasOnly(['buyerOrgId', 'status']) && 
+         incoming().status == 'sold' && 
+         isMember(incoming().buyerOrgId)) ||
+        // Action: Seller update or Admin
+        (isMember(existing().sellerOrgId) || isAdmin())
+      );
+    }
+    
+    match /system_config/{configId} {
+      allow read, write: if isAdmin();
+    }
+    
+    match /global_admins/{userId} {
+      allow read: if isSignedIn();
+    }
+  }
+}
